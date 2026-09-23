@@ -1,0 +1,33 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Build app (debug)",
+      "type": "shell",
+      "command": "cmake --build --preset app",
+      "group": { "kind": "build", "isDefault": true },
+      "problemMatcher": ["$gcc"]
+    },
+    {
+      "label": "Build all formats (debug)",
+      "type": "shell",
+      "command": "cmake --build --preset debug",
+      "group": "build",
+      "problemMatcher": ["$gcc"]
+    },
+    {
+      "label": "Build release (universal)",
+      "type": "shell",
+      "command": "cmake --preset release && cmake --build --preset release",
+      "group": "build",
+      "problemMatcher": ["$gcc"]
+    },
+    {
+      "label": "Run MicFX",
+      "type": "shell",
+      "command": "open build/debug/MicFX_artefacts/Debug/Standalone/MicFX.app",
+      "dependsOn": "Build app (debug)",
+      "problemMatcher": []
+    }
+  ]
+}

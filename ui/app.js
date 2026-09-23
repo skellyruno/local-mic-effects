@@ -1,0 +1,702 @@
+// MicFX web UI. Runs inside the JUCE WebView; every control is bound to a processor
+// parameter through the relays created in src/PluginEditor.cpp (relay name = parameter ID).
+import * as Juce from "./juce/index.js";
+import { CATEGORIES, MODULES, NOTE_NAMES, SCALES } from "./modules.js";
+
+// Uncaught errors go to the app's log (VS Code debug console / terminal). In debug
+// builds you can also right-click the UI -> Inspect Element for Safari's Web Inspector.
+const logError = Juce.getNativeFunction("logError");
+window.addEventListener("error", (event) => logError(`${event.message} (${event.filename}:${event.lineno})`));
+window.addEventListener("unhandledrejection", (event) => logError(`Unhandled rejection: ${event.reason}`));
+
+const ARC_START = -135;
+const ARC_END = 135;
+const METER_FLOOR_DB = -60;
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+let parameterDefaults = {};
+
+const clamp = (value, min = 0, max = 1) => Math.min(max, Math.max(min, value));
+
+// Scaled value -> [0, 1], mirroring juce::NormalisableRange (range + skew).
+function toNormalised(state, scaled) {
+  const { start, end, skew } = state.properties;
+  return end === start ? 0 : Math.pow(clamp((scaled - start) / (end - start)), skew);
+}
+
+function formatValue(value, label) {
+  const signed = (text) => (value > 0.05 ? `+${text}` : text);
+
+  switch (label) {
+    case "Hz": return value >= 1000 ? `${(value / 1000).toFixed(value >= 10000 ? 1 : 2)} kHz`
+                                    : `${value < 10 ? value.toFixed(2) : Math.round(value)} Hz`;
+    case "dB": return `${signed(value.toFixed(1))} dB`;
+    case "st": return `${signed(value.toFixed(Number.isInteger(value) ? 0 : 1))} st`;
+    case "%": return `${Math.round(value)}%`;
+    case "ms": return `${Math.round(value)} ms`;
+    case "bit": return `${value.toFixed(1)} bit`;
+    case ":1": return `${value.toFixed(1)}:1`;
+    default: return value.toFixed(2);
+  }
+}
+
+function noteName(note) {
+  return `${NOTE_NAMES[((note % 12) + 12) % 12]}${Math.floor(note / 12) - 1}`;
+}
+
+function svg(tag, attributes = {}) {
+  const element = document.createElementNS(SVG_NS, tag);
+  for (const [name, value] of Object.entries(attributes)) element.setAttribute(name, value);
+  return element;
+}
+
+function html(tag, className = "", text = "") {
+  return Object.assign(document.createElement(tag), { className, textContent: text });
+}
+
+// Point on a circle in the knob's 100x100 viewBox; 0 degrees is straight up.
+function polar(angleDeg, radius) {
+  const angle = (angleDeg * Math.PI) / 180;
+  return [50 + radius * Math.sin(angle), 50 - radius * Math.cos(angle)];
+}
+
+function arcPath(fromDeg, toDeg, radius) {
+  const [a, b] = fromDeg <= toDeg ? [fromDeg, toDeg] : [toDeg, fromDeg];
+  const [x1, y1] = polar(a, radius);
+  const [x2, y2] = polar(b, radius);
+  return `M ${x1} ${y1} A ${radius} ${radius} 0 ${b - a > 180 ? 1 : 0} 1 ${x2} ${y2}`;
+}
+
+//==============================================================================
+// Rotary control bound to a slider relay.
+class Knob {
+  constructor(element, { param, label, bipolar = false, onUserChange = () => {} }) {
+    this.element = element;
+    this.id = param;
+    this.bipolar = bipolar;
+    this.onUserChange = onUserChange;
+    this.state = Juce.getSliderState(param);
+
+    this.arc = svg("path", { class: "value-arc" });
+    this.pointer = svg("line", { class: "pointer" });
+    const dial = svg("svg", { viewBox: "0 0 100 100" });
+    dial.append(
+      svg("path", { class: "track", d: arcPath(ARC_START, ARC_END, 44) }),
+      this.arc,
+      svg("circle", { class: "body", cx: 50, cy: 50, r: 32 }),
+      this.pointer,
+    );
+
+    this.readout = html("div", "readout");
+    element.classList.add("knob");
+    element.append(dial, this.readout, html("div", "name", label));
+
+    element.tabIndex = 0;
+    element.setAttribute("role", "slider");
+    element.setAttribute("aria-label", label);
+    element.title = "Drag or scroll · Shift for fine control · Double-click to reset";
+
+    this.state.valueChangedEvent.addListener(() => this.render());
+    this.state.propertiesChangedEvent.addListener(() => this.render());
+
+    element.addEventListener("pointerdown", (event) => this.onPointerDown(event));
+    element.addEventListener("wheel", (event) => this.onWheel(event), { passive: false });
+    element.addEventListener("keydown", (event) => this.onKeyDown(event));
+    element.addEventListener("dblclick", () => this.resetToDefault());
+
+    this.render();
+  }
+
+  get normalised() {
+    return clamp(this.state.getNormalisedValue()) || 0;
+  }
+
+  setNormalised(value) {
+    this.state.setNormalisedValue(clamp(value));
+    this.onUserChange();
+    this.render(); // The backend echoes the change as well; rendering now keeps drags snappy.
+  }
+
+  // Wraps a one-off change in a gesture so hosts record it as a single automation edit.
+  change(value) {
+    this.state.sliderDragStarted();
+    this.setNormalised(value);
+    this.state.sliderDragEnded();
+  }
+
+  onPointerDown(event) {
+    event.preventDefault();
+    this.element.focus();
+    this.element.setPointerCapture(event.pointerId);
+    this.state.sliderDragStarted();
+
+    let lastY = event.clientY;
+    let value = this.normalised;
+
+    const move = (moveEvent) => {
+      const pixelsForFullRange = moveEvent.shiftKey ? 900 : 220;
+      value = clamp(value + (lastY - moveEvent.clientY) / pixelsForFullRange);
+      lastY = moveEvent.clientY;
+      this.setNormalised(value);
+    };
+
+    const end = () => {
+      this.state.sliderDragEnded();
+      this.element.removeEventListener("pointermove", move);
+      this.element.removeEventListener("pointerup", end);
+      this.element.removeEventListener("pointercancel", end);
+    };
+
+    this.element.addEventListener("pointermove", move);
+    this.element.addEventListener("pointerup", end);
+    this.element.addEventListener("pointercancel", end);
+  }
+
+  onWheel(event) {
+    event.preventDefault();
+    this.change(this.normalised - event.deltaY * (event.shiftKey ? 0.0004 : 0.002));
+  }
+
+  onKeyDown(event) {
+    const step = event.shiftKey ? 0.002 : 0.02;
+    const keys = {
+      ArrowUp: this.normalised + step,
+      ArrowRight: this.normalised + step,
+      ArrowDown: this.normalised - step,
+      ArrowLeft: this.normalised - step,
+      Home: 0,
+      End: 1,
+    };
+
+    if (!(event.key in keys)) return;
+    event.preventDefault();
+    this.change(keys[event.key]);
+  }
+
+  resetToDefault() {
+    const defaultValue = parameterDefaults[this.id];
+    if (defaultValue !== undefined) this.change(toNormalised(this.state, defaultValue));
+  }
+
+  render() {
+    const angle = ARC_START + this.normalised * (ARC_END - ARC_START);
+    const arcStart = this.bipolar ? 0 : ARC_START;
+    this.arc.setAttribute("d", Math.abs(angle - arcStart) < 0.5 ? "" : arcPath(arcStart, angle, 44));
+
+    const [x1, y1] = polar(angle, 12);
+    const [x2, y2] = polar(angle, 25);
+    Object.entries({ x1, y1, x2, y2 }).forEach(([name, value]) => this.pointer.setAttribute(name, value));
+
+    const text = formatValue(this.state.getScaledValue(), this.state.properties.label);
+    this.readout.textContent = text;
+    this.element.setAttribute("aria-valuetext", text);
+    this.element.dispatchEvent(new CustomEvent("knob-change", { bubbles: true }));
+  }
+}
+
+//==============================================================================
+// Choice parameter: segmented buttons for a few options, a dropdown for more.
+class Choice {
+  constructor(param, label, onUserChange) {
+    this.state = Juce.getComboBoxState(param);
+    this.onUserChange = onUserChange;
+    this.element = html("div", "choice");
+    this.element.append(html("div", "name", label));
+    this.signature = null; // choices arrive from C++ after construction; build once now, rebuild then
+
+    this.state.valueChangedEvent.addListener(() => this.render());
+    this.state.propertiesChangedEvent.addListener(() => this.render());
+    this.render();
+  }
+
+  select(index) {
+    this.state.setChoiceIndex(index);
+    this.onUserChange();
+    this.render();
+  }
+
+  build(choices) {
+    this.control?.remove();
+
+    if (choices.length <= 3) {
+      this.control = html("div", "segmented");
+      choices.forEach((choice, index) => {
+        const button = html("button", "", choice);
+        button.addEventListener("click", () => this.select(index));
+        this.control.append(button);
+      });
+    } else {
+      this.control = html("select", "dropdown");
+      choices.forEach((choice) => this.control.append(new Option(choice)));
+      this.control.addEventListener("change", () => this.select(this.control.selectedIndex));
+    }
+
+    this.element.append(this.control);
+  }
+
+  render() {
+    const choices = this.state.properties.choices ?? [];
+    if (choices.join("|") !== this.signature) {
+      this.signature = choices.join("|");
+      this.build(choices);
+    }
+
+    const index = choices.length > 0 ? this.state.getChoiceIndex() : 0;
+
+    if (this.control.tagName === "SELECT") this.control.selectedIndex = index;
+    else [...this.control.children].forEach((button, i) => button.classList.toggle("is-selected", i === index));
+  }
+}
+
+//==============================================================================
+// On/off switch for a bool parameter that isn't a module's power button.
+class Pill {
+  constructor(param, label, onUserChange) {
+    this.state = Juce.getToggleState(param);
+    this.element = html("button", "pill");
+    this.element.append(html("span", "switch"), html("span", "", label));
+    this.element.addEventListener("click", () => {
+      this.state.setValue(!this.state.getValue());
+      onUserChange();
+      this.render();
+    });
+
+    this.state.valueChangedEvent.addListener(() => this.render());
+    this.render();
+  }
+
+  render() {
+    this.element.setAttribute("aria-pressed", String(Boolean(this.state.getValue())));
+  }
+}
+
+//==============================================================================
+// One-octave keyboard for choosing the autotune key; lights up the scale and the
+// note currently being tuned to.
+class KeyPicker {
+  static WHITE = [0, 2, 4, 5, 7, 9, 11];
+  static BLACK = [[1, 0], [3, 1], [6, 3], [8, 4], [10, 5]]; // [semitone, white key to its left]
+
+  constructor(param, scaleParam, onUserChange) {
+    this.key = Juce.getComboBoxState(param);
+    this.scale = Juce.getComboBoxState(scaleParam);
+    this.onUserChange = onUserChange;
+    this.target = -1;
+
+    this.element = html("div", "keys-picker");
+    const row = html("div", "row");
+    row.append(html("span", "name", "Key"), (this.keyLabel = html("span", "name")));
+    this.piano = html("div", "piano");
+    this.element.append(row, this.piano);
+
+    this.keys = new Array(12);
+
+    for (const semitone of KeyPicker.WHITE) this.keys[semitone] = this.addKey(semitone, "white");
+
+    for (const [semitone, whiteIndex] of KeyPicker.BLACK) {
+      const key = this.addKey(semitone, "black");
+      key.style.left = `${((whiteIndex + 1) / 7) * 100 - 4.5}%`;
+      this.keys[semitone] = key;
+    }
+
+    for (const state of [this.key, this.scale]) {
+      state.valueChangedEvent.addListener(() => this.render());
+      state.propertiesChangedEvent.addListener(() => this.render());
+    }
+
+    this.render();
+  }
+
+  addKey(semitone, colour) {
+    const key = html("button", `key ${colour}`, NOTE_NAMES[semitone]);
+    key.title = NOTE_NAMES[semitone];
+    key.addEventListener("click", () => {
+      this.key.setChoiceIndex(semitone);
+      this.onUserChange();
+      this.render();
+    });
+    this.piano.append(key);
+    return key;
+  }
+
+  setTarget(note) {
+    const pitchClass = note >= 0 ? note % 12 : -1;
+    if (pitchClass === this.target) return;
+    this.target = pitchClass;
+    this.render();
+  }
+
+  render() {
+    const root = this.key.properties.choices.length ? this.key.getChoiceIndex() : 0;
+    const scale = SCALES[this.scale.properties.choices.length ? this.scale.getChoiceIndex() : 0] ?? SCALES[0];
+    this.keyLabel.textContent = `${NOTE_NAMES[root]} ${this.scale.properties.choices[this.scale.getChoiceIndex()] ?? ""}`;
+
+    this.keys.forEach((key, semitone) => {
+      key.classList.toggle("is-root", semitone === root);
+      key.classList.toggle("in-scale", scale.includes((semitone - root + 12) % 12));
+      key.classList.toggle("is-target", semitone === this.target);
+    });
+  }
+}
+
+//==============================================================================
+// Shows the note autotune is pulling towards and how far off the sung pitch is.
+class Tuner {
+  constructor() {
+    this.element = html("div", "tuner");
+    this.note = html("div", "note", "—");
+    this.needle = html("div", "needle");
+    const scale = html("div", "scale");
+    scale.append(this.needle);
+    this.detail = html("div", "detail", "Sing to see your pitch");
+    this.element.append(this.note, scale, this.detail);
+  }
+
+  update(sung, target) {
+    const active = sung >= 0 && target >= 0;
+    this.element.classList.toggle("is-active", active);
+
+    if (!active) {
+      this.note.textContent = "—";
+      this.detail.textContent = "Sing to see your pitch";
+      return;
+    }
+
+    const cents = Math.round((sung - target) * 100);
+    const name = noteName(target);
+    this.note.innerHTML = `${name.replace(/-?\d+$/, "")}<small>${name.match(/-?\d+$/)[0]}</small>`;
+    this.needle.style.left = `${50 + clamp(cents, -50, 50)}%`;
+    this.detail.textContent = cents === 0 ? "in tune" : `${cents > 0 ? "+" : ""}${cents}¢ ${cents > 0 ? "sharp" : "flat"}`;
+  }
+}
+
+//==============================================================================
+// Decorative decay envelope that follows the reverb's size, damping and mix.
+class ReverbGraphic {
+  constructor(card) {
+    this.element = svg("svg", { class: "reverb-graphic", viewBox: "0 0 400 60", preserveAspectRatio: "none" });
+    card.addEventListener("knob-change", () => this.render());
+    this.render();
+  }
+
+  render() {
+    const value = (id) => Juce.getSliderState(id).getScaledValue() / 100;
+    const size = value("reverbSize");
+    const damping = value("reverbDamping");
+    const mix = value("reverbMix");
+    const bars = 72;
+    const barWidth = 400 / bars;
+    const decay = 0.05 + size * 0.45;
+
+    this.element.replaceChildren(...Array.from({ length: bars }, (_, i) => {
+      const t = i / bars;
+      const envelope = Math.exp(-t / decay);
+      const sparkle = 0.55 + 0.45 * Math.abs(Math.sin(i * 12.9898));
+      const height = Math.max(1.5, 54 * envelope * sparkle * (1 - damping * t * 0.8) * (0.2 + 0.8 * mix));
+
+      return svg("rect", {
+        x: i * barWidth + 1, y: 58 - height, width: barWidth - 2, height, rx: 1.5,
+        opacity: (0.3 + 0.7 * envelope).toFixed(3),
+      });
+    }));
+  }
+}
+
+//==============================================================================
+// Peak meter with instant attack, smooth fall-off and a held peak marker.
+class Meter {
+  constructor(element) {
+    this.element = element;
+    this.cover = html("div", "cover");
+    this.peakLine = html("div", "peak");
+    this.readout = html("div", "readout", "−∞");
+
+    const track = html("div", "track");
+    track.append(this.cover, this.peakLine);
+    element.append(track, this.readout);
+
+    this.level = METER_FLOOR_DB;
+    this.peak = METER_FLOOR_DB;
+    this.peakHeldAt = 0;
+  }
+
+  push(db) {
+    this.level = Math.max(this.level, db);
+
+    if (db >= this.peak) {
+      this.peak = db;
+      this.peakHeldAt = performance.now();
+    }
+  }
+
+  tick(now, elapsedMs) {
+    this.level = Math.max(METER_FLOOR_DB, this.level - elapsedMs * 0.03);
+
+    if (now - this.peakHeldAt > 1200)
+      this.peak = Math.max(METER_FLOOR_DB, this.peak - elapsedMs * 0.02);
+
+    const toPercent = (db) => clamp((db - METER_FLOOR_DB) / -METER_FLOOR_DB) * 100;
+    this.cover.style.height = `${100 - toPercent(this.level)}%`;
+    this.peakLine.style.bottom = `calc(${toPercent(this.peak)}% - 2px)`;
+    this.readout.textContent = this.peak <= METER_FLOOR_DB ? "−∞" : this.peak.toFixed(1);
+    this.element.classList.toggle("is-hot", this.peak > -1);
+  }
+}
+
+//==============================================================================
+class PresetBar {
+  constructor(element) {
+    this.element = element;
+    this.menu = element.querySelector(".preset-menu");
+    this.button = element.querySelector(".preset-button");
+    this.nameLabel = element.querySelector(".preset-name");
+    this.presets = [];
+    this.current = -1;
+    this.modified = false;
+
+    this.loadPreset = Juce.getNativeFunction("loadPreset");
+
+    this.button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      this.menu.hidden ? this.open() : this.close();
+    });
+
+    element.querySelectorAll("[data-preset-step]").forEach((button) =>
+      button.addEventListener("click", () => this.step(Number(button.dataset.presetStep))));
+
+    document.addEventListener("click", (event) => {
+      if (!this.menu.contains(event.target)) this.close();
+    });
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") this.close();
+    });
+
+    Juce.getNativeFunction("getPresets")().then((presets) => {
+      this.presets = presets ?? [];
+      this.buildMenu();
+      this.render();
+    });
+  }
+
+  buildMenu() {
+    const groups = new Map();
+
+    this.presets.forEach((preset, index) => {
+      if (!groups.has(preset.category)) {
+        const group = html("div", "preset-group");
+        group.append(html("h3", "", preset.category));
+        groups.set(preset.category, group);
+        this.menu.append(group);
+      }
+
+      const button = html("button", "", preset.name);
+      button.dataset.index = index;
+      button.addEventListener("click", () => this.load(index));
+      groups.get(preset.category).append(button);
+    });
+  }
+
+  open() {
+    this.menu.hidden = false;
+    this.button.setAttribute("aria-expanded", "true");
+  }
+
+  close() {
+    this.menu.hidden = true;
+    this.button.setAttribute("aria-expanded", "false");
+  }
+
+  load(index) {
+    const count = this.presets.length;
+    if (count === 0) return;
+
+    const wrapped = ((index % count) + count) % count;
+    this.close();
+    this.loadPreset(wrapped).then((loaded) => {
+      this.current = loaded;
+      this.modified = false;
+      this.render();
+    });
+  }
+
+  step(delta) {
+    this.load(Math.max(0, this.current) + delta);
+  }
+
+  // The host (or a restored session) may change the preset behind our back.
+  syncFromHost(index) {
+    if (index === this.current) return;
+    this.current = index;
+    this.modified = false;
+    this.render();
+  }
+
+  markModified() {
+    if (this.modified) return;
+    this.modified = true;
+    this.render();
+  }
+
+  render() {
+    this.nameLabel.textContent = this.presets[this.current]?.name ?? "—";
+    this.element.classList.toggle("is-modified", this.modified);
+    this.menu.querySelectorAll("button").forEach((button) =>
+      button.classList.toggle("is-current", Number(button.dataset.index) === this.current));
+  }
+}
+
+//==============================================================================
+// Builds the sidebar (every effect, grouped) and the chain (cards for effects that
+// are switched on, in processing order).
+class Rack {
+  constructor({ sidebar, grid, empty, count, onUserChange }) {
+    this.grid = grid;
+    this.empty = empty;
+    this.count = count;
+    this.onUserChange = onUserChange;
+    this.entries = [];
+
+    const groups = {};
+    for (const [key, category] of Object.entries(CATEGORIES)) {
+      const group = html("div", "sidebar-group");
+      group.style.setProperty("--cat", category.color);
+      group.append(html("h3", "", category.name));
+      sidebar.append(group);
+      groups[key] = group;
+    }
+
+    for (const module of MODULES) {
+      const power = Juce.getToggleState(module.power);
+      const card = this.buildCard(module, power);
+      const item = this.buildSidebarItem(module, power, card);
+
+      groups[module.category].append(item);
+      grid.append(card);
+      this.entries.push({ module, power, card, item });
+
+      power.valueChangedEvent.addListener(() => this.refresh());
+    }
+
+    this.refresh();
+  }
+
+  buildCard(module, power) {
+    const card = html("section", `card${module.wide ? " wide" : ""}`);
+    card.dataset.module = module.id;
+    card.style.setProperty("--cat", CATEGORIES[module.category].color);
+    card.hidden = true;
+
+    const header = html("header");
+    const powerButton = html("button", "power");
+    powerButton.setAttribute("aria-label", `Turn ${module.name} off`);
+    powerButton.title = "Turn off";
+    powerButton.addEventListener("click", () => {
+      power.setValue(false);
+      this.onUserChange();
+      this.refresh();
+    });
+
+    header.append(html("span", "step"), html("h2", "", module.name), powerButton);
+
+    const controls = html("div", "controls");
+    for (const control of module.controls)
+      controls.append(this.buildControl(control, card));
+
+    card.append(header, html("p", "desc", module.description), controls);
+    return card;
+  }
+
+  buildControl(control, card) {
+    switch (control.type) {
+      case "knob": {
+        const element = html("div");
+        new Knob(element, { ...control, onUserChange: this.onUserChange });
+        return element;
+      }
+      case "choice": return new Choice(control.param, control.label, this.onUserChange).element;
+      case "toggle": return new Pill(control.param, control.label, this.onUserChange).element;
+      case "tuner": return (this.tuner = new Tuner()).element;
+      case "keys": return (this.keyPicker = new KeyPicker(control.param, control.scaleParam, this.onUserChange)).element;
+      case "reverb-graphic": return new ReverbGraphic(card).element;
+      default: throw new Error(`Unknown control type ${control.type}`);
+    }
+  }
+
+  buildSidebarItem(module, power, card) {
+    const item = html("button", "effect-item");
+    item.style.setProperty("--cat", CATEGORIES[module.category].color);
+    item.title = module.description;
+    item.append(html("span", "led"), html("span", "", module.name));
+
+    item.addEventListener("click", () => {
+      const on = !power.getValue();
+      power.setValue(on);
+      this.onUserChange();
+      this.refresh();
+
+      if (on) {
+        card.scrollIntoView({ behavior: "smooth", block: "nearest" });
+        card.classList.remove("is-flashing");
+        void card.offsetWidth; // restart the animation
+        card.classList.add("is-flashing");
+      }
+    });
+
+    return item;
+  }
+
+  refresh() {
+    let active = 0;
+
+    for (const { power, card, item } of this.entries) {
+      const on = Boolean(power.getValue());
+      card.hidden = !on;
+      item.classList.toggle("is-on", on);
+      item.setAttribute("aria-pressed", String(on));
+
+      if (on) card.querySelector(".step").textContent = String(++active).padStart(2, "0");
+    }
+
+    this.count.textContent = `${active} on`;
+    this.empty.hidden = active > 0;
+  }
+}
+
+//==============================================================================
+const presetBar = new PresetBar(document.querySelector(".preset-bar"));
+const markModified = () => presetBar.markModified();
+
+const rack = new Rack({
+  sidebar: document.querySelector(".sidebar-groups"),
+  grid: document.querySelector(".chain-grid"),
+  empty: document.querySelector(".chain-empty"),
+  count: document.querySelector(".active-count"),
+  onUserChange: markModified,
+});
+
+// Input/output gain belong to the mic setup rather than the preset.
+document.querySelectorAll(".levels .knob").forEach((element) =>
+  new Knob(element, { param: element.dataset.param, label: element.dataset.label, bipolar: element.hasAttribute("data-bipolar") }));
+
+const meters = Object.fromEntries(
+  [...document.querySelectorAll("[data-meter]")].map((element) => [element.dataset.meter, new Meter(element)]),
+);
+
+window.__JUCE__.backend.addEventListener("meters", (status) => {
+  meters.input.push(status.input);
+  meters.output.push(status.output);
+  rack.tuner?.update(status.note, status.target);
+  rack.keyPicker?.setTarget(status.target);
+  presetBar.syncFromHost(status.preset);
+});
+
+let lastFrame = performance.now();
+requestAnimationFrame(function frame(now) {
+  Object.values(meters).forEach((meter) => meter.tick(now, now - lastFrame));
+  lastFrame = now;
+  requestAnimationFrame(frame);
+});
+
+Juce.getNativeFunction("getParameterDefaults")().then((defaults) => {
+  parameterDefaults = defaults ?? {};
+});

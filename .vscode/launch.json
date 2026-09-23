@@ -1,0 +1,23 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      // F5: build and run the standalone app under the debugger.
+      // macOS will ask for microphone access on behalf of VS Code the first time.
+      "name": "Debug MicFX",
+      "type": "lldb",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/debug/MicFX_artefacts/Debug/Standalone/MicFX.app/Contents/MacOS/MicFX",
+      "cwd": "${workspaceFolder}",
+      "preLaunchTask": "Build app (debug)"
+    },
+    {
+      // Start the app yourself (Tasks: Run MicFX), then attach. Mic permission belongs to MicFX itself.
+      "name": "Attach to MicFX",
+      "type": "lldb",
+      "request": "attach",
+      "program": "${workspaceFolder}/build/debug/MicFX_artefacts/Debug/Standalone/MicFX.app/Contents/MacOS/MicFX",
+      "waitFor": true
+    }
+  ]
+}

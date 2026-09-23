@@ -1,0 +1,19 @@
+{
+  // CMake Tools drives configure/build from CMakePresets.json
+  "cmake.useCMakePresets": "always",
+  "cmake.configureOnOpen": true,
+  "cmake.buildBeforeRun": true,
+
+  // clangd gives fast, accurate IntelliSense from the exported compile_commands.json
+  "clangd.arguments": [
+    "--compile-commands-dir=${workspaceFolder}/build/debug",
+    "--background-index",
+    "--header-insertion=never",
+    "--clang-tidy=false"
+  ],
+  "C_Cpp.intelliSenseEngine": "disabled",
+
+  "files.associations": { "*.h": "cpp" },
+  "files.exclude": { "build": true },
+  "search.exclude": { "build": true, "libs/JUCE": true }
+}

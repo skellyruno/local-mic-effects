@@ -1,0 +1,175 @@
+#include "Parameters.h"
+#include "dsp/PitchEngine.h"
+
+namespace
+{
+    using Layout = juce::AudioProcessorValueTreeState::ParameterLayout;
+
+    template <typename Param, typename... Args>
+    Param& add (Layout& layout, const char* id, const char* name, Args&&... args)
+    {
+        auto param = std::make_unique<Param> (juce::ParameterID { id, 1 }, name, std::forward<Args> (args)...);
+        auto& ref = *param;
+        layout.add (std::move (param));
+        return ref;
+    }
+
+    // `centre` puts that value at the middle of the knob (log-like feel for Hz and ms).
+    FloatParam& number (Layout& layout, const char* id, const char* name, float min, float max, float step,
+                        float defaultValue, const char* label, float centre = 0.0f)
+    {
+        juce::NormalisableRange<float> range { min, max, step };
+        if (centre > min && centre < max)
+            range.setSkewForCentre (centre);
+
+        return add<FloatParam> (layout, id, name, range, defaultValue,
+                                juce::AudioParameterFloatAttributes{}.withLabel (label));
+    }
+
+    BoolParam& toggle (Layout& layout, const char* id, const char* name, bool defaultValue = false)
+    {
+        return add<BoolParam> (layout, id, name, defaultValue);
+    }
+
+    ChoiceParam& choice (Layout& layout, const char* id, const char* name, const juce::StringArray& choices, int defaultIndex = 0)
+    {
+        return add<ChoiceParam> (layout, id, name, choices, defaultIndex);
+    }
+
+    FloatParam& decibels (Layout& layout, const char* id, const char* name, float min, float max, float defaultValue)
+    {
+        return number (layout, id, name, min, max, 0.1f, defaultValue, "dB");
+    }
+
+    FloatParam& percent (Layout& layout, const char* id, const char* name, float defaultValue, float max = 100.0f)
+    {
+        return number (layout, id, name, 0.0f, max, 1.0f, defaultValue, "%");
+    }
+
+    FloatParam& hertz (Layout& layout, const char* id, const char* name, float min, float max, float defaultValue, float centre)
+    {
+        return number (layout, id, name, min, max, 0.01f, defaultValue, "Hz", centre);
+    }
+
+    FloatParam& semitones (Layout& layout, const char* id, const char* name, float range, float step, float defaultValue)
+    {
+        return number (layout, id, name, -range, range, step, defaultValue, "st");
+    }
+}
+
+Parameters::Parameters (Layout& l)
+    : inputGain  (decibels (l, "inputGain", "Input Gain", -24.0f, 24.0f, 0.0f)),
+
+      highPass   { toggle (l, "hpfOn", "High-Pass On", true),
+                   hertz (l, "hpfFreq", "High-Pass Freq", 20.0f, 400.0f, 80.0f, 100.0f) },
+
+      gate       { toggle (l, "gateOn", "Gate On", true),
+                   decibels (l, "gateThreshold", "Gate Threshold", -80.0f, 0.0f, -55.0f) },
+
+      autotune   { toggle (l, "tuneOn", "Autotune On"),
+                   choice (l, "tuneKey", "Autotune Key", fx::PitchEngine::getKeyNames()),
+                   choice (l, "tuneScale", "Autotune Scale", fx::PitchEngine::getScaleNames()),
+                   number (l, "tuneSpeed", "Autotune Speed", 0.0f, 200.0f, 1.0f, 20.0f, "ms", 40.0f),
+                   percent (l, "tuneAmount", "Autotune Amount", 100.0f) },
+
+      pitchShift { toggle (l, "pitchOn", "Pitch Shift On"),
+                   semitones (l, "pitchShift", "Pitch", 12.0f, 0.1f, 0.0f),
+                   semitones (l, "pitchFormant", "Formant", 12.0f, 0.1f, 0.0f) },
+
+      harmonizer { toggle (l, "harmonyOn", "Harmonizer On"),
+                   semitones (l, "harmonyVoice1", "Harmony Voice 1", 12.0f, 1.0f, 4.0f),
+                   semitones (l, "harmonyVoice2", "Harmony Voice 2", 12.0f, 1.0f, 7.0f),
+                   percent (l, "harmonyMix", "Harmony Mix", 50.0f) },
+
+      eq         { toggle (l, "eqOn", "EQ On"),
+                   decibels (l, "eqLow", "EQ Low", -12.0f, 12.0f, 0.0f),
+                   hertz (l, "eqMidFreq", "EQ Mid Freq", 200.0f, 5000.0f, 2500.0f, 1000.0f),
+                   decibels (l, "eqMidGain", "EQ Mid Gain", -12.0f, 12.0f, 0.0f),
+                   decibels (l, "eqHigh", "EQ High", -12.0f, 12.0f, 0.0f) },
+
+      compressor { toggle (l, "compOn", "Compressor On", true),
+                   decibels (l, "compThreshold", "Comp Threshold", -60.0f, 0.0f, -18.0f),
+                   number (l, "compRatio", "Comp Ratio", 1.0f, 20.0f, 0.1f, 3.0f, ":1", 4.0f) },
+
+      deEsser    { toggle (l, "deessOn", "De-esser On"),
+                   decibels (l, "deessThreshold", "De-esser Threshold", -60.0f, 0.0f, -30.0f),
+                   hertz (l, "deessFreq", "De-esser Freq", 3000.0f, 10000.0f, 6000.0f, 5500.0f) },
+
+      exciter    { toggle (l, "exciterOn", "Exciter On"),
+                   hertz (l, "exciterFreq", "Exciter Freq", 1000.0f, 10000.0f, 3500.0f, 3000.0f),
+                   percent (l, "exciterAmount", "Exciter Amount", 30.0f) },
+
+      saturation { toggle (l, "satOn", "Saturation On"),
+                   number (l, "satDrive", "Drive", 0.0f, 30.0f, 0.1f, 12.0f, "dB"),
+                   percent (l, "satMix", "Saturation Mix", 100.0f) },
+
+      radio      { toggle (l, "radioOn", "Radio On"),
+                   hertz (l, "radioLow", "Radio Low Cut", 100.0f, 1500.0f, 400.0f, 400.0f),
+                   hertz (l, "radioHigh", "Radio High Cut", 1000.0f, 8000.0f, 3200.0f, 3000.0f) },
+
+      bitcrusher { toggle (l, "crushOn", "Bitcrusher On"),
+                   number (l, "crushBits", "Bits", 2.0f, 16.0f, 0.1f, 8.0f, "bit"),
+                   hertz (l, "crushRate", "Sample Rate", 1000.0f, 24000.0f, 8000.0f, 6000.0f),
+                   percent (l, "crushMix", "Bitcrusher Mix", 100.0f) },
+
+      robot      { toggle (l, "robotOn", "Robot On"),
+                   hertz (l, "robotFreq", "Robot Freq", 10.0f, 1000.0f, 50.0f, 80.0f),
+                   percent (l, "robotMix", "Robot Mix", 100.0f) },
+
+      filter     { toggle (l, "filterOn", "Filter On"),
+                   choice (l, "filterType", "Filter Type", { "Low-pass", "High-pass", "Band-pass" }),
+                   hertz (l, "filterCutoff", "Filter Cutoff", 20.0f, 20000.0f, 1200.0f, 1000.0f),
+                   percent (l, "filterResonance", "Filter Resonance", 30.0f) },
+
+      autoWah    { toggle (l, "wahOn", "Auto-wah On"),
+                   percent (l, "wahSensitivity", "Wah Sensitivity", 60.0f),
+                   hertz (l, "wahFreq", "Wah Freq", 200.0f, 2000.0f, 400.0f, 600.0f),
+                   percent (l, "wahMix", "Wah Mix", 100.0f) },
+
+      tremolo    { toggle (l, "tremoloOn", "Tremolo On"),
+                   hertz (l, "tremoloRate", "Tremolo Rate", 0.5f, 20.0f, 6.0f, 5.0f),
+                   percent (l, "tremoloDepth", "Tremolo Depth", 60.0f) },
+
+      vibrato    { toggle (l, "vibratoOn", "Vibrato On"),
+                   hertz (l, "vibratoRate", "Vibrato Rate", 0.5f, 12.0f, 5.5f, 5.0f),
+                   percent (l, "vibratoDepth", "Vibrato Depth", 40.0f) },
+
+      chorus     { toggle (l, "chorusOn", "Chorus On"),
+                   hertz (l, "chorusRate", "Chorus Rate", 0.05f, 5.0f, 0.8f, 1.0f),
+                   percent (l, "chorusDepth", "Chorus Depth", 35.0f),
+                   percent (l, "chorusMix", "Chorus Mix", 50.0f) },
+
+      flanger    { toggle (l, "flangerOn", "Flanger On"),
+                   hertz (l, "flangerRate", "Flanger Rate", 0.05f, 5.0f, 0.25f, 0.5f),
+                   percent (l, "flangerDepth", "Flanger Depth", 70.0f),
+                   percent (l, "flangerFeedback", "Flanger Feedback", 60.0f, 95.0f),
+                   percent (l, "flangerMix", "Flanger Mix", 50.0f) },
+
+      phaser     { toggle (l, "phaserOn", "Phaser On"),
+                   hertz (l, "phaserRate", "Phaser Rate", 0.05f, 5.0f, 0.4f, 0.5f),
+                   percent (l, "phaserDepth", "Phaser Depth", 70.0f),
+                   percent (l, "phaserFeedback", "Phaser Feedback", 50.0f, 95.0f),
+                   percent (l, "phaserMix", "Phaser Mix", 50.0f) },
+
+      doubler    { toggle (l, "doublerOn", "Doubler On"),
+                   percent (l, "doublerMix", "Doubler Mix", 50.0f),
+                   percent (l, "doublerSpread", "Doubler Spread", 80.0f) },
+
+      echo       { toggle (l, "delayOn", "Echo On"),
+                   number (l, "delayTime", "Echo Time", 20.0f, 1500.0f, 1.0f, 350.0f, "ms", 300.0f),
+                   percent (l, "delayFeedback", "Echo Feedback", 35.0f, 95.0f),
+                   percent (l, "delayMix", "Echo Mix", 25.0f),
+                   toggle (l, "delayPingPong", "Echo Ping-Pong") },
+
+      reverb     { toggle (l, "reverbOn", "Reverb On", true),
+                   percent (l, "reverbMix", "Reverb Mix", 25.0f),
+                   percent (l, "reverbSize", "Reverb Size", 50.0f),
+                   percent (l, "reverbDamping", "Reverb Damping", 50.0f),
+                   percent (l, "reverbWidth", "Reverb Width", 100.0f) },
+
+      width      { toggle (l, "widthOn", "Stereo Width On"),
+                   percent (l, "widthAmount", "Stereo Width", 150.0f, 200.0f) },
+
+      outputGain (decibels (l, "outputGain", "Output Gain", -24.0f, 24.0f, 0.0f))
+{
+}

@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MicFX</title>
+  <link rel="stylesheet" href="styles.css">
+  <script type="module" src="app.js"></script>
+</head>
+<body>
+  <!-- Shared gradient for the logo and the level knobs -->
+  <svg width="0" height="0" aria-hidden="true" style="position:absolute">
+    <defs>
+      <linearGradient id="arc-gradient" x1="0" y1="1" x2="1" y2="0">
+        <stop offset="0" stop-color="#8c7bff" />
+        <stop offset="1" stop-color="#3fd9c6" />
+      </linearGradient>
+    </defs>
+  </svg>
+
+  <header class="topbar">
+    <div class="brand">
+      <svg class="logo" viewBox="0 0 32 32" aria-hidden="true">
+        <rect width="32" height="32" rx="9" fill="url(#arc-gradient)" />
+        <path d="M7 16h2.5l2-6 3 12 3-15 3 13 2-4H25" fill="none" stroke="#0c0e13" stroke-width="2.2"
+              stroke-linecap="round" stroke-linejoin="round" />
+      </svg>
+      <div>
+        <h1>MicFX</h1>
+        <p>Live voice processor</p>
+      </div>
+    </div>
+
+    <div class="preset-bar">
+      <button class="icon-button" data-preset-step="-1" aria-label="Previous preset">‹</button>
+      <button class="preset-button" aria-haspopup="true" aria-expanded="false">
+        <span class="preset-label">Preset</span>
+        <span class="preset-name">—</span>
+        <span class="preset-modified" title="Changed since the preset was loaded">•</span>
+        <span class="chevron">▾</span>
+      </button>
+      <button class="icon-button" data-preset-step="1" aria-label="Next preset">›</button>
+      <div class="preset-menu" hidden></div>
+    </div>
+
+    <div class="chips">
+      <span class="chip chip--live"><span class="dot"></span>Live</span>
+      <span class="chip">Headphones recommended</span>
+    </div>
+  </header>
+
+  <div class="workspace">
+    <nav class="sidebar" aria-label="Effects">
+      <div class="sidebar-header">
+        <h2>Effects</h2>
+        <span class="active-count"></span>
+      </div>
+      <div class="sidebar-groups"></div>
+    </nav>
+
+    <main class="chain" aria-label="Active effects">
+      <div class="chain-grid"></div>
+      <div class="chain-empty" hidden>
+        <p class="big">Your chain is empty</p>
+        <p>Switch on effects from the list, or pick a preset above.</p>
+      </div>
+    </main>
+
+    <aside class="levels" aria-label="Levels">
+      <section class="level">
+        <h2>Input</h2>
+        <div class="knob" data-param="inputGain" data-label="Gain" data-bipolar></div>
+        <div class="meter" data-meter="input"></div>
+      </section>
+      <section class="level">
+        <h2>Output</h2>
+        <div class="knob" data-param="outputGain" data-label="Gain" data-bipolar></div>
+        <div class="meter" data-meter="output"></div>
+        <p class="limiter-note">Limited at −1 dB</p>
+      </section>
+    </aside>
+  </div>
+</body>
+</html>
