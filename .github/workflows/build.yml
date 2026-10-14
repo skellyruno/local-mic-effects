@@ -1,0 +1,57 @@
+name: Build plugin artifacts
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  # Used only if libs/JUCE is empty (submodule not registered). Bump as needed.
+  JUCE_REF: 8.0.6
+
+jobs:
+  build:
+    name: Windows (VST3)
+    runs-on: windows-2022
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # Fallback if the JUCE submodule is missing/empty
+      - name: Ensure JUCE is present
+        shell: bash
+        run: |
+          if [ ! -f libs/JUCE/CMakeLists.txt ]; then
+            echo "libs/JUCE is empty, cloning JUCE ${JUCE_REF}"
+            rm -rf libs/JUCE
+            git clone --depth 1 --branch "${JUCE_REF}" https://github.com/juce-framework/JUCE.git libs/JUCE
+          fi
+
+      - name: Configure
+        run: cmake -S . -B build -A x64 -DMICFX_BUILD_TESTS=OFF
+
+      - name: Build
+        run: cmake --build build --config Release --target MicFX_VST3 --parallel
+
+      - name: Package Windows zip
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path artifacts
+          $vst3 = "build\MicFX_artefacts\Release\VST3\MicFX.vst3"
+          Compress-Archive -Path $vst3 -DestinationPath "artifacts\MicFX-Windows-x64.zip"
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: MicFX-Windows-x64
+          path: artifacts/*
+
+      # ---------- Release assets ----------
+      - name: Attach release assets
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
