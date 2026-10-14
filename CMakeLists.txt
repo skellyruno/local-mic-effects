@@ -24,6 +24,7 @@ juce_add_plugin(MicFX
     IS_MIDI_EFFECT FALSE
     EDITOR_WANTS_KEYBOARD_FOCUS FALSE
     NEEDS_WEB_BROWSER TRUE
+    NEEDS_WEBVIEW2 TRUE
     NEEDS_CURL FALSE
     MICROPHONE_PERMISSION_ENABLED TRUE
     MICROPHONE_PERMISSION_TEXT "MicFX processes your microphone in real time to apply audio effects."
@@ -61,6 +62,7 @@ target_include_directories(MicFX PRIVATE src)
 target_compile_definitions(MicFX
     PUBLIC
         JUCE_WEB_BROWSER=1
+        JUCE_USE_WIN_WEBVIEW2_WITH_STATIC_LINKING=1
         JUCE_USE_CURL=0
         JUCE_VST3_CAN_REPLACE_VST2=0
     PRIVATE
