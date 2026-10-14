@@ -30,8 +30,19 @@ jobs:
             git clone --depth 1 --branch "${JUCE_REF}" https://github.com/juce-framework/JUCE.git libs/JUCE
           fi
 
+      # JUCE does not download the WebView2 SDK itself; install it from NuGet.
+      # Version must match what the JUCE release expects (see FindWebView2.cmake).
+      - name: Install WebView2 SDK
+        shell: pwsh
+        run: |
+          nuget install Microsoft.Web.WebView2 -Version 1.0.3485.44 -OutputDirectory "$env:RUNNER_TEMP\webview2"
+          Get-ChildItem "$env:RUNNER_TEMP\webview2"
+
       - name: Configure
-        run: cmake -S . -B build -A x64 -DMICFX_BUILD_TESTS=OFF
+        shell: pwsh
+        run: |
+          $wv2 = "$env:RUNNER_TEMP\webview2" -replace '\\','/'
+          cmake -S . -B build -A x64 -DMICFX_BUILD_TESTS=OFF "-DJUCE_WEBVIEW2_PACKAGE_LOCATION=$wv2"
 
       - name: Build
         run: cmake --build build --config Release --target MicFX_VST3 --parallel
